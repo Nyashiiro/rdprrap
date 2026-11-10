@@ -5,36 +5,42 @@
 //! (H4) that mirror the CheckTermsrvDependencies / restart logic in the
 //! upstream Delphi `RDPWInst.dpr`.
 //!
-//! The cohort implementation deliberately scopes itself to a curated list of
-//! well-known siblings (`UmRdpService`, `SessionEnv`) rather than enumerating
-//! every netsvcs service via `EnumServicesStatusExW`. Upstream rdpwrap's
-//! original restart logic was scoped to precisely this set and a broader
-//! enumeration would (a) require a further Cargo feature on `windows-rs` for
-//! the enumerate APIs and (b) risk bouncing unrelated critical services (for
-//! example `DHCP`, `EventLog`, `LSM`) that also live on the netsvcs host.
-//! If a future operator asks for the full walk we can add it behind a flag.
+//! The cohort implementation asks the SCM for the services that are currently
+//! running AND depend on TermService — the exact set behind
+//! `ERROR_DEPENDENT_SERVICES_RUNNING` (1051) — then merges a curated list of
+//! well-known siblings as a floor. It deliberately does NOT enumerate every
+//! netsvcs service via `EnumServicesStatusExW`: upstream rdpwrap's restart
+//! logic was scoped to precisely this narrow set, and a broader walk would
+//! risk bouncing unrelated critical services (`DHCP`, `EventLog`, `LSM`, ...)
+//! that also live on a shared svchost host.
 
 use anyhow::{anyhow, Context, Result};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_SERVICE_NOT_ACTIVE};
 use windows::Win32::System::Services::{
-    CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
-    QueryServiceStatus, StartServiceW, QUERY_SERVICE_CONFIGW, SC_HANDLE, SC_MANAGER_CONNECT,
-    SERVICE_CONTROL_STOP, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-    SERVICE_START, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_STOP_PENDING,
+    CloseServiceHandle, ControlService, EnumDependentServicesW, OpenSCManagerW, OpenServiceW,
+    QueryServiceConfigW, QueryServiceStatus, StartServiceW, ENUM_SERVICE_STATUSW,
+    QUERY_SERVICE_CONFIGW, SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_ACTIVE,
+    SERVICE_CONTROL_STOP, SERVICE_ENUMERATE_DEPENDENTS, SERVICE_QUERY_CONFIG,
+    SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS, SERVICE_STOP,
+    SERVICE_STOPPED, SERVICE_STOP_PENDING,
 };
 
 /// Service name used by the Windows Terminal Services host.
 pub const TERMSERVICE: &str = "TermService";
 
-/// svchost group that TermService lives in on every supported Windows release.
+/// Legacy svchost group name, used only for the secondary ImagePath probe in
+/// [`enumerate_cohort_services`] and for the diagnostic line in `install::run`.
 ///
-/// The original upstream cohort restart logic walked HKLM\..\Svchost\<group>
-/// for sibling services; we use the ImagePath substring `-k netsvcs` as an
-/// equivalent, feature-gate-free check.
+/// This is NOT an authoritative group for TermService: on 26100 it runs with
+/// `-k NetworkService` (and its siblings with `LocalSystemNetworkRestricted`
+/// / `SessionEnvSvc`), so a `-k netsvcs` match is expected to find nothing.
+/// The dynamic dependant query in [`enumerate_cohort_services`] is the
+/// load-bearing source now.
 pub const NETSVCS_GROUP: &str = "netsvcs";
-/// Substring we look for inside `QueryServiceConfigW().lpBinaryPathName` to
-/// identify a service that shares the same svchost host as TermService.
+/// Legacy ImagePath substring, retained for the install diagnostic line and
+/// the secondary probe. See [`NETSVCS_GROUP`] — do not rely on it to identify
+/// the cohort on its own.
 pub const NETSVCS_IMAGEPATH_MARKER: &str = "-k netsvcs";
 
 /// Service names we know belong to the TermService cohort and which we will
@@ -203,32 +209,109 @@ unsafe fn wide_ptr_to_string(p: *const u16, cap: usize) -> String {
     String::from_utf16_lossy(slice)
 }
 
-/// Return the subset of `KNOWN_COHORT_SIBLINGS` whose current ImagePath on
-/// the local SCM contains the `-k <group_name>` marker — i.e. the subset
-/// that actually shares one svchost instance with TermService on this host.
+/// Append `name` to `out` unless an equal (case-insensitive) entry is present.
+fn push_unique(out: &mut Vec<String>, name: &str) {
+    if !out.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+        out.push(name.to_string());
+    }
+}
+
+/// Ask the SCM which services are currently running and depend on `name`.
 ///
-/// Any sibling whose SCM config cannot be read (because the service does not
-/// exist on this SKU, or because it lives under a different svchost group
-/// such as `termsvcs` on Windows 10 1803+) is silently skipped.
+/// This is exactly the set that makes `ControlService(STOP)` fail with
+/// `ERROR_DEPENDENT_SERVICES_RUNNING` (1051): on 26100 the answer is
+/// `UmRdpService`, whose ImagePath (`-k LocalSystemNetworkRestricted`) shares
+/// no svchost group with TermService's `-k NetworkService`. Best-effort — any
+/// probe failure yields an empty list so callers fall back to curated names.
+fn query_active_dependents(scm: &ScmHandle, name: &str) -> Vec<String> {
+    const MAX_DEPENDENTS_BYTES: u32 = 256 * 1024;
+
+    let svc = match ServiceHandle::open(scm, name, SERVICE_ENUMERATE_DEPENDENTS) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut needed: u32 = 0;
+    let mut returned: u32 = 0;
+    // Size probe: ERROR_MORE_DATA is expected. `needed` covers BOTH the
+    // ENUM_SERVICE_STATUSW array and the NUL-terminated name strings SCM
+    // appends after it, so the real buffer must be sized in bytes, not items.
+    let _ = unsafe {
+        EnumDependentServicesW(svc.0, SERVICE_ACTIVE, None, 0, &mut needed, &mut returned)
+    };
+    if needed == 0 || needed > MAX_DEPENDENTS_BYTES {
+        return Vec::new();
+    }
+
+    // 8-byte-aligned storage (PWSTR fields require it), with slack so the
+    // trailing strings SCM emits always fit.
+    let words = (needed as usize + 7) / 8 + 16;
+    let mut buf = vec![0u64; words];
+    let byte_len = (buf.len() * 8) as u32;
+    let mut needed2: u32 = 0;
+    let mut returned2: u32 = 0;
+    let rc = unsafe {
+        EnumDependentServicesW(
+            svc.0,
+            SERVICE_ACTIVE,
+            Some(buf.as_mut_ptr() as *mut ENUM_SERVICE_STATUSW),
+            byte_len,
+            &mut needed2,
+            &mut returned2,
+        )
+    };
+    if rc.is_err() {
+        return Vec::new();
+    }
+
+    let item = core::mem::size_of::<ENUM_SERVICE_STATUSW>();
+    let count = (returned2 as usize).min(byte_len as usize / item);
+    let entries = buf.as_ptr() as *const ENUM_SERVICE_STATUSW;
+    let mut out = Vec::new();
+    for i in 0..count {
+        // SAFETY: `i < count` is bounded by the byte length of `buf`.
+        let entry = unsafe { &*entries.add(i) };
+        if entry.lpServiceName.is_null() {
+            continue;
+        }
+        // SAFETY: SCM writes the name inside `buf`, which is alive here.
+        let s = unsafe { wide_ptr_to_string(entry.lpServiceName.as_ptr(), 256) };
+        if !s.is_empty() {
+            push_unique(&mut out, &s);
+        }
+    }
+    out
+}
+
+/// Return the services that must be stopped/restarted around TermService.
 ///
-/// Returns an empty Vec (not Err) if the SCM probe fails for any reason —
-/// callers treat an empty list as "no cohort siblings detected, restart
-/// TermService alone".
+/// Primary source: the running dependants reported by the SCM (see
+/// [`query_active_dependents`]) — host- and release-specific, so it must be
+/// queried rather than derived from a hard-coded svchost group. Secondary:
+/// the legacy `-k <group_name>` ImagePath probe, which on modern Windows
+/// yields nothing but is kept for hosts that co-host siblings without an SCM
+/// dependency. Finally the curated [`KNOWN_COHORT_SIBLINGS`] are added as a
+/// floor, so a failed probe can never leave a known sibling out.
+///
+/// All SCM failures are best-effort: callers still restart TermService.
 pub fn enumerate_cohort_services(group_name: &str) -> Result<Vec<String>> {
     let scm = match ScmHandle::open(SC_MANAGER_CONNECT) {
         Ok(s) => s,
         Err(_) => return Ok(Vec::new()),
     };
+
+    let mut result = query_active_dependents(&scm, TERMSERVICE);
+
     let marker = format!("-k {group_name}").to_ascii_lowercase();
-    let mut result = Vec::new();
     for name in KNOWN_COHORT_SIBLINGS {
-        let image_path = match query_service_image_path(&scm, name) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if image_path.to_ascii_lowercase().contains(&marker) {
-            result.push((*name).to_string());
+        if let Ok(image_path) = query_service_image_path(&scm, name) {
+            if image_path.to_ascii_lowercase().contains(&marker) {
+                push_unique(&mut result, name);
+            }
         }
+    }
+    for name in KNOWN_COHORT_SIBLINGS {
+        push_unique(&mut result, name);
     }
     Ok(result)
 }
@@ -434,8 +517,9 @@ fn start_named_service(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Restart TermService along with any cohort services that share its svchost
-/// host ("-k netsvcs"). Cohort stops/starts are best-effort — we warn on
+/// Restart TermService along with its running dependants (the cohort whose
+/// presence would otherwise make `ControlService(STOP)` fail with 1051) plus
+/// the curated siblings. Cohort stops/starts are best-effort — we warn on
 /// failure but never block the TermService restart (which is the load-
 /// bearing part of the install).
 pub fn restart_termservice_with_cohort() -> Result<()> {
@@ -450,14 +534,12 @@ pub fn restart_termservice_with_cohort() -> Result<()> {
             Vec::new()
         }
     };
-    // Include well-known siblings that may not be running right now (and
-    // thus not show up in the active enumeration) — they still need a
-    // restart if they were stopped mid-transaction.
+    // `enumerate_cohort_services` already adds the curated siblings as a
+    // floor; re-assert them here (deduplicated) so this function stays
+    // correct even if that helper short-circuits on an SCM failure.
     let mut merged: Vec<String> = cohort;
     for known in KNOWN_COHORT_SIBLINGS {
-        if !merged.iter().any(|s| s.eq_ignore_ascii_case(known)) {
-            merged.push((*known).to_string());
-        }
+        push_unique(&mut merged, known);
     }
 
     // Stop cohort first (best-effort), then stop + start TermService, then
@@ -487,4 +569,37 @@ pub fn restart_termservice_with_cohort() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_unique_dedups_case_insensitively_and_preserves_order() {
+        let mut names = vec!["UmRdpService".to_string()];
+        push_unique(&mut names, "umrdpservice");
+        push_unique(&mut names, "SessionEnv");
+        push_unique(&mut names, "SESSIONENV");
+        push_unique(&mut names, "TermService");
+        assert_eq!(
+            names,
+            vec![
+                "UmRdpService".to_string(),
+                "SessionEnv".to_string(),
+                "TermService".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn marker_probe_is_documented_as_non_authoritative() {
+        // On 26100 TermService and its siblings do not share "-k netsvcs";
+        // the constant is a legacy probe/log label, not a group identifier.
+        assert_eq!(NETSVCS_GROUP, "netsvcs");
+        assert_eq!(NETSVCS_IMAGEPATH_MARKER, "-k netsvcs");
+        for sibling in KNOWN_COHORT_SIBLINGS {
+            assert!(!sibling.is_empty());
+        }
+    }
 }
