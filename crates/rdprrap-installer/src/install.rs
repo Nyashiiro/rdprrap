@@ -51,8 +51,11 @@ pub fn run(opts: Options) -> Result<()> {
     println!("rdprrap-installer: source dir    {}", source_dir.display());
 
     // C2: CheckInstall preflight — if our own wrapper DLL is already the
-    // ServiceDll, refuse to reinstall unless --force was supplied.
-    if !opts.force && check_already_installed(&install_dir)? {
+    // ServiceDll, refuse to reinstall unless --force was supplied. Keep the
+    // result: step 3 needs it to avoid re-snapshooting our own wrapper as the
+    // "original" DLL on a forced reinstall.
+    let already_installed = check_already_installed(&install_dir)?;
+    if !opts.force && already_installed {
         bail!(
             "rdprrap is already installed at {}. Use --force to reinstall, \
              or uninstall first.",
@@ -98,8 +101,22 @@ pub fn run(opts: Options) -> Result<()> {
 
     // Step 3: snapshot original ServiceDll + fDenyTSConnections + AllowMulti +
     // AddIns presence, then save state.
-    let original = registry::get_service_dll()?
-        .unwrap_or_else(|| "%SystemRoot%\\System32\\termsrv.dll".to_string());
+    // On a `--force` reinstall `get_service_dll()` already points at OUR
+    // wrapper. Saving that as `OriginalServiceDll` would overwrite the only
+    // path back to vanilla termsrv.dll and make uninstall "restore" the
+    // wrapper forever. Reuse the value saved by the previous install; when no
+    // state exists at all, fall back to the standard system path (never to the
+    // live wrapper value).
+    let original = if already_installed {
+        let saved = registry::load_uninstall_state()?
+            .map(|state| state.original_service_dll)
+            .unwrap_or_else(|| "%SystemRoot%\\System32\\termsrv.dll".to_string());
+        println!("rdprrap-installer: reusing saved OriginalServiceDll = {saved}");
+        saved
+    } else {
+        registry::get_service_dll()?
+            .unwrap_or_else(|| "%SystemRoot%\\System32\\termsrv.dll".to_string())
+    };
 
     // M3: validate the captured pre-install ServiceDll *before* we bake it
     // into the rollback closure. If the value we read from the registry was
