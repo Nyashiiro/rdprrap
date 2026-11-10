@@ -2,7 +2,7 @@
 
 RDP Wrapper rewritten in Rust.
 
-**English** | [한국어](docs/README.ko.md)
+**English** | [한국어](docs/README.ko.md) | [中文](docs/README.zh.md)
 
 ## Key Features
 

@@ -2,7 +2,7 @@
 
 Rust로 재작성한 RDP Wrapper.
 
-[English](../README.md) | **한국어**
+[English](../README.md) | **한국어** | [中文](README.zh.md)
 
 ## 주요 기능
 

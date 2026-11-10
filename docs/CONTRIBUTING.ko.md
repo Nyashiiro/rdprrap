@@ -1,6 +1,6 @@
 # rdprrap 기여 가이드
 
-[English](../CONTRIBUTING.md) | **한국어**
+[English](../CONTRIBUTING.md) | **한국어** | [中文](CONTRIBUTING.zh.md)
 
 rdprrap에 기여해 주셔서 감사합니다.
 

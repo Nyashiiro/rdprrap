@@ -1,6 +1,6 @@
 # Windows Runtime Verification Checklist
 
-**English** | [한국어](TESTING.ko.md)
+**English** | [한국어](TESTING.ko.md) | [中文](TESTING.zh.md)
 
 Linux CI builds and Windows CI builds cover compile + clippy + unit
 tests for x64/x86, plus ARM64 build/static checks. What CI cannot

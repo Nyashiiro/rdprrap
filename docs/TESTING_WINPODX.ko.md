@@ -1,6 +1,6 @@
 # winpodx 로 런타임 테스트
 
-[English](TESTING_WINPODX.md) | **한국어**
+[English](TESTING_WINPODX.md) | **한국어** | [中文](TESTING_WINPODX.zh.md)
 
 [winpodx](https://github.com/kernalix7/winpodx) 는 Linux 위에서
 실제 Windows 컨테이너를 (dockur/windows + KVM/QEMU, FreeRDP RemoteApp

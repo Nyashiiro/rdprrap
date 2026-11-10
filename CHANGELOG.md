@@ -1,6 +1,6 @@
 # Changelog
 
-**English** | [한국어](docs/CHANGELOG.ko.md)
+**English** | [한국어](docs/CHANGELOG.ko.md) | [中文](docs/CHANGELOG.zh.md)
 
 All notable changes to this project will be documented in this file.
 

@@ -1,6 +1,6 @@
 # Windows 런타임 검증 체크리스트
 
-[English](TESTING.md) | **한국어**
+[English](TESTING.md) | **한국어** | [中文](TESTING.zh.md)
 
 Linux CI 및 Windows CI 빌드는 x64/x86 의 컴파일 + clippy + 단위
 테스트와 ARM64 빌드/정적 체크까지 커버합니다. 반면 CI 로는 커버할

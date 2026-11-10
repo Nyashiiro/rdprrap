@@ -1,6 +1,6 @@
 # 변경 이력
 
-[English](../CHANGELOG.md) | **한국어**
+[English](../CHANGELOG.md) | **한국어** | [中文](CHANGELOG.zh.md)
 
 이 프로젝트의 주요 변경 사항은 이 문서에 기록됩니다.
 

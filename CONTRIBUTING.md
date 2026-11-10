@@ -1,6 +1,6 @@
 # Contributing to rdprrap
 
-**English** | [한국어](docs/CONTRIBUTING.ko.md)
+**English** | [한국어](docs/CONTRIBUTING.ko.md) | [中文](docs/CONTRIBUTING.zh.md)
 
 Thanks for your interest in contributing to rdprrap.
 

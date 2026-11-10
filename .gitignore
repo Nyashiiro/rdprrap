@@ -44,3 +44,8 @@ uninstall-backup-*/
 # Environment
 .env
 .env.local
+
+# Local Cache
+*tmp
+.cache
+.local

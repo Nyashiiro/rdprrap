@@ -1,6 +1,6 @@
 # Runtime Testing via winpodx
 
-**English** | [한국어](TESTING_WINPODX.ko.md)
+**English** | [한국어](TESTING_WINPODX.ko.md) | [中文](TESTING_WINPODX.zh.md)
 
 [winpodx](https://github.com/kernalix7/winpodx) runs a real Windows
 container on Linux (dockur/windows + KVM/QEMU, exposed via FreeRDP
