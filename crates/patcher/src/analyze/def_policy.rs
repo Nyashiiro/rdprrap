@@ -36,7 +36,13 @@
 //!     bytes) re-targeted to the original target is emitted, plus one `0x90` NOP
 //!     to fill the 6th byte. `emitted.len() == ip_after_jcc - patch_addr`.
 //!   - **any other length:** not supported — returns `None` with a skip reason.
-//! * **Indirect JNZ:** not supported — returns `None` with a logged skip reason.
+//! * **Indirect JNZ:** the same branch-rewrite form as direct JNZ. The rewrite
+//!   spans from the first MOV up to the `Jne` opcode, which is turned into an
+//!   unconditional JMP to the SAME target (short `75 rel8` keeps its original
+//!   rel8; near `0F 85` is re-encoded as `E9 rel32` + NOP). Synthesising a
+//!   branch with no resolvable target was what produced the historical `EB FE`
+//!   self-loop (SEC-ROBUST-01); taking the target from the original Jcc removes
+//!   that failure mode.
 //!
 //! On any mismatch or non-encodable register the analyzer returns `None` and
 //! logs a skip reason (mirroring the umwrap log-and-skip posture) rather than
@@ -168,8 +174,11 @@ pub fn analyze_defpolicy_bits(code: &[u8], base_ip: u64, bits: u32) -> Option<De
                         let Some(load) =
                             preceding_load(&recent_loads[..recent_len], base_reg, value_reg)
                         else {
-                            debug_log("DefPolicy: write displacement not recoverable, skipping\n");
-                            return None;
+                            // A look-alike CMP without a matching preceding load
+                            // is just an unrelated compare. Keep scanning so a
+                            // later, genuine DefPolicy gate can still be found.
+                            debug_log("DefPolicy: write displacement not recoverable, skipping candidate\n");
+                            continue;
                         };
                         let patch_addr = load.ip;
                         let write_disp = load.disp;
@@ -398,16 +407,29 @@ fn peek_conditional_jump(code: &[u8], base_ip: u64, jcc_ip: u64, bits: u32) -> O
     })
 }
 
-/// Indirect form (x64): confirm a `CMP r1,r2` (either order) starting at
-/// `search_ip`, immediately followed by a conditional jump. On success build a
-/// descriptor that rewrites from `first_mov_ip` using `write_disp` (= the second
-/// MOV's displacement).
+/// Indirect form (x64): confirm that the instruction at `search_ip` (i.e. the
+/// one immediately following the second `MOV r,[base+d]`) is a `CMP r1,r2`
+/// (either order) followed at once by a conditional jump. On success build a
+/// descriptor that rewrites from `first_mov_ip` using `write_disp` (= the
+/// second MOV's displacement).
 ///
-/// Only the `Je` (JZ) shape is supported. The `Jne` (JZ-inverted) shape is
-/// deliberately *not* patched: the region between `first_mov_ip` and the `Jne`
-/// is too small to fit the store, NOP padding, and a correctly-placed short JMP
-/// without borrowing the `CMP` ModRM bytes, which historically produced an
-/// `EB FE` (`jmp $-2`) infinite self-loop in live termsrv (SEC-ROBUST-01).
+/// The old implementation scanned forward as far as `RET` for a matching
+/// `CMP r,r`. On builds whose two loads are separated from the gate by logging
+/// calls, that let an *earlier, unrelated* MOV pair claim a later CMP and
+/// anchor the rewrite over the call / `xor esi,esi` / argument setup — leaving
+/// the function's return register undefined. Requiring the CMP to be the very
+/// next instruction also guarantees every overwritten byte lies inside the
+/// two-MOV + CMP + Jcc region.
+///
+/// Both `Je` (JZ) and `Jne` (JNZ) shapes are supported:
+/// * JZ: store + NOP padding spans the whole region through the Jcc, so the
+///   conditional branch is neutralised (SEC-ROBUST-02).
+/// * JNZ: the taken branch is the *allow* path, so it must stay live. Reuse
+///   [`emit_defpolicy_direct`]'s branch-rewrite form, which turns the `Jne`
+///   opcode into an unconditional JMP to the SAME target. SEC-ROBUST-01's
+///   `EB FE` self-loop came from fabricating a short jump with no resolvable
+///   target; here the target comes from the original Jcc (`near_branch_target()`
+///   for the near form, the untouched original `rel8` for the short form).
 ///
 /// Reachable only from the `bits == 64` arm of [`analyze_defpolicy_bits`], so it
 /// is always compiled (no `cfg` gate) and decodes at a fixed 64-bit bitness.
@@ -422,55 +444,68 @@ fn analyze_indirect_compare(
     r2: Register,
     write_disp: i32,
 ) -> Option<DefPolicyPatch> {
-    let start = (search_ip - base_ip) as usize;
+    let start = search_ip.checked_sub(base_ip)? as usize;
     if start >= code.len() {
         return None;
     }
     let mut decoder = Decoder::with_ip(64, &code[start..], search_ip, DecoderOptions::NONE);
-    let mut inst = Instruction::default();
-
-    while decoder.can_decode() {
-        decoder.decode_out(&mut inst);
-        if inst.mnemonic() == Mnemonic::Cmp
-            && inst.op0_kind() == OpKind::Register
-            && inst.op1_kind() == OpKind::Register
-        {
-            let a = inst.op0_register();
-            let b = inst.op1_register();
-            if (a == r1 && b == r2) || (a == r2 && b == r1) {
-                let jcc_ip = inst.ip() + inst.len() as u64;
-                let CondJump {
-                    is_jnz, jcc_len, ..
-                } = peek_conditional_jump(code, base_ip, jcc_ip, 64)?;
-                if is_jnz {
-                    // SEC-ROBUST-01: the indirect JNZ shape cannot be neutralised
-                    // within the available region without corrupting the CMP, so
-                    // bail conservatively instead of emitting an EB FE self-loop.
-                    debug_log("DefPolicy: indirect JNZ not supported, skipping\n");
-                    return None;
-                }
-                let value_reg = indirect_value_reg(r2);
-                // SEC-ROBUST-02: span the store + NOP padding through the original
-                // CMP+Jcc so the conditional branch is neutralised rather than
-                // left to test stale registers.
-                let ip_after_jcc = jcc_ip + jcc_len as u64;
-                let region_len = (ip_after_jcc - first_mov_ip) as usize;
-                let bytes = emit_store_padded(base_reg, value_reg, write_disp, region_len)?;
-                return Some(DefPolicyPatch {
-                    patch_addr: first_mov_ip,
-                    base_reg,
-                    value_reg,
-                    write_disp,
-                    is_jnz,
-                    bytes,
-                });
-            }
-        }
-        if matches!(inst.mnemonic(), Mnemonic::Ret) {
-            break;
-        }
+    if !decoder.can_decode() {
+        return None;
     }
-    None
+    let mut inst = Instruction::default();
+    decoder.decode_out(&mut inst);
+
+    // Strict adjacency: the gate CMP must be the instruction right after the
+    // second load. Anything else is a different (possibly unrelated) compare.
+    if inst.mnemonic() != Mnemonic::Cmp
+        || inst.op0_kind() != OpKind::Register
+        || inst.op1_kind() != OpKind::Register
+    {
+        return None;
+    }
+    let a = inst.op0_register();
+    let b = inst.op1_register();
+    if !((a == r1 && b == r2) || (a == r2 && b == r1)) {
+        return None;
+    }
+
+    let jcc_ip = inst.ip() + inst.len() as u64;
+    let CondJump {
+        is_jnz,
+        jcc_len,
+        target: jcc_target,
+    } = peek_conditional_jump(code, base_ip, jcc_ip, 64)?;
+    let value_reg = indirect_value_reg(r2);
+    let ip_after_jcc = jcc_ip + jcc_len as u64;
+    let bytes = if is_jnz {
+        // Branch-rewrite form: forced store + NOP padding up to the Jne opcode,
+        // then an unconditional JMP to the original allow target.
+        emit_defpolicy_direct(
+            base_reg,
+            value_reg,
+            write_disp,
+            true,
+            first_mov_ip,
+            jcc_ip,
+            jcc_len,
+            jcc_target,
+            ip_after_jcc,
+        )?
+    } else {
+        // SEC-ROBUST-02: neutralise form — span store + NOP padding through the
+        // original CMP+Jcc so no live conditional branch tests stale registers.
+        let region_len = (ip_after_jcc - first_mov_ip) as usize;
+        emit_store_padded(base_reg, value_reg, write_disp, region_len)?
+    };
+
+    Some(DefPolicyPatch {
+        patch_addr: first_mov_ip,
+        base_reg,
+        value_reg,
+        write_disp,
+        is_jnz,
+        bytes,
+    })
 }
 
 /// Map the register loaded by the second indirect MOV to the 32-bit register
@@ -960,19 +995,60 @@ mod tests {
         assert_eq!(p.bytes.len(), 16);
     }
 
-    // --- SEC-ROBUST-01: indirect JNZ must bail (return None) ---
+    // --- SEC-ROBUST-01: indirect JNZ is patched by rewriting the Jne into an
+    // unconditional JMP to its ORIGINAL target, never a synthesised EB FE. ---
     #[test]
-    fn indirect_jnz_returns_none() {
+    fn indirect_jnz_rewrites_unconditional_jmp_to_allow_path() {
         let mut code = Vec::new();
         code.extend_from_slice(&[0x8B, 0xB9, 0x3C, 0x06, 0x00, 0x00]); // mov edi,[rcx+0x63c]
         code.extend_from_slice(&[0x8B, 0xB1, 0x38, 0x06, 0x00, 0x00]); // mov esi,[rcx+0x638]
         code.extend_from_slice(&[0x3B, 0xFE]); // cmp edi,esi
-        code.extend_from_slice(&[0x75, 0x10]); // jnz +0x10
-                                               // The indirect JNZ shape historically produced EB FE; it must now bail.
-        assert!(
-            analyze_defpolicy_bits(&code, BASE, 64).is_none(),
-            "indirect JNZ must not be patched"
-        );
+        code.extend_from_slice(&[0x75, 0x10]); // jnz +0x10 (allow path)
+        let p = analyze_defpolicy_bits(&code, BASE, 64).expect("indirect JNZ gate");
+        assert!(p.is_jnz);
+        assert_eq!(p.patch_addr, BASE);
+        assert_eq!(p.write_disp, 0x638);
+        assert_eq!(p.value_reg, Register::ESI);
+        assert_eq!(p.bytes.len(), 15); // 6+6+2 prefix bytes + 0xEB
+        assert_eq!(*p.bytes.last().expect("non-empty"), 0xEB);
+        let jcc_ip = BASE + 14;
+        let spliced = splice(&code, 0, &p.bytes);
+        assert_short_jmp_at(&spliced, BASE, jcc_ip, 0x10);
+    }
+
+    // --- 26100.9949 (Windows 11 24H2/25H2) CDefPolicy::Query gate -----------
+    // Real bytes: mov r8d,[rdi+0x63c]; mov r9d,[rdi+0x638]; cmp r8d,r9d; jne.
+    // A decoy MOV pair precedes the gate: an analyzer scanning forward to RET
+    // for a CMP would anchor the rewrite on the wrong instruction and clobber
+    // the log call / `xor esi,esi` that establishes the success return value.
+    #[test]
+    fn build_26100_9949_indirect_jnz_gate() {
+        let mut code = Vec::new();
+        // Decoy: mov eax,[rdi+0x644]; mov r8d,[rdi+0x63c] (log-call arguments).
+        code.extend_from_slice(&[0x8B, 0x87, 0x44, 0x06, 0x00, 0x00]);
+        code.extend_from_slice(&[0x44, 0x8B, 0x87, 0x3C, 0x06, 0x00, 0x00]);
+        let gate_off = code.len();
+        // Verbatim from termsrv.dll 10.0.26100.9949 @ RVA 0xA6896.
+        code.extend_from_slice(&[
+            0x44, 0x8B, 0x87, 0x3C, 0x06, 0x00, 0x00, // mov r8d,[rdi+0x63c]
+            0x44, 0x8B, 0x8F, 0x38, 0x06, 0x00, 0x00, // mov r9d,[rdi+0x638]
+            0x45, 0x3B, 0xC1, // cmp r8d,r9d
+            0x75, 0x14, // jne +0x14 (allow path)
+        ]);
+        let p = analyze_defpolicy_bits(&code, BASE, 64).expect("26100.9949 gate");
+        assert_eq!(p.patch_addr, BASE + gate_off as u64);
+        assert_eq!(p.base_reg, Register::RDI);
+        assert_eq!(p.value_reg, Register::R9D);
+        assert_eq!(p.write_disp, 0x638);
+        assert!(p.is_jnz);
+        assert_load_imm(&p.bytes, Register::R9D);
+        assert_store(&p.bytes, 6, Register::RDI, Register::R9D, 0x638);
+        // 7+7+3 = 17 prefix bytes, then 0xEB overwrites only the jne opcode.
+        assert_eq!(p.bytes.len(), 18);
+        assert_eq!(*p.bytes.last().expect("non-empty"), 0xEB);
+        let jcc_ip = BASE + gate_off as u64 + 17;
+        let spliced = splice(&code, gate_off, &p.bytes);
+        assert_short_jmp_at(&spliced, BASE, jcc_ip, 0x14);
     }
 
     // --- Variant 4: r9d_rdi (direct, JNZ) with a preceding load ---
