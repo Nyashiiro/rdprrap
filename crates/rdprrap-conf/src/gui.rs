@@ -5,10 +5,11 @@
 //! timer callback and the individual labels; a flat builder keeps the control
 //! map explicit.
 //!
-//! Layout strategy: two absolute-positioned `GroupBox`es on the left/top of
-//! the window, with a `GridLayout` holding the label pairs inside each group
-//! and a simple vertical stack of buttons at the bottom. native-windows-gui
-//! `GridLayout` handles resizing the text rows automatically.
+//! Layout strategy: four absolute-positioned `Frame` containers plus a row of
+//! buttons at the bottom. There is no Layout object — every control is placed
+//! with `.position()` / `.size()`. NWG controls own their HWND, so the Frames
+//! and static labels must be stored on `App`: a dropped Frame destroys every
+//! child window with it.
 
 #![allow(clippy::too_many_lines)]
 
@@ -35,6 +36,11 @@ const TIMER_INTERVAL_MS: u32 = 1000;
 /// `RefCell` is used for the *current UI model* (read at start-up, mutated by
 /// event handlers, committed by Apply/OK). `Cell<bool>` holds the cheap
 /// "dirty" flag so we can toggle it without borrowing anything else.
+///
+/// Several fields (parent Frames, static labels) are pure RAII keep-alives:
+/// they are never read after construction, but dropping them destroys their
+/// HWND and blanks the dialog.
+#[allow(dead_code)]
 pub struct App {
     // Window + resources.
     pub window: nwg::Window,
@@ -44,6 +50,19 @@ pub struct App {
     #[allow(dead_code)]
     pub font: nwg::Font,
     pub timer: nwg::AnimationTimer,
+
+    // Parent frames. NWG controls own their HWND: dropping a Frame destroys
+    // that window and, recursively, every child control. Keeping these as
+    // locals in build() blanked the whole dialog while the buttons (parented
+    // to `window`) survived. They must live as long as `App`.
+    pub grp_diag: nwg::Frame,
+    pub grp_general: nwg::Frame,
+    pub grp_auth: nwg::Frame,
+    pub grp_shadow: nwg::Frame,
+    /// `let _ = mk_label(..)` drops the label (and its HWND) immediately, so
+    /// static labels with no runtime state still need an owner.
+    pub static_labels: Vec<nwg::Label>,
+    pub lbl_port: nwg::Label,
 
     // Diagnostics labels.
     pub lbl_wrapper_state: nwg::Label,
@@ -130,17 +149,18 @@ impl App {
             l
         };
 
-        let _ = mk_label(&grp_diag, "Wrapper state:", 8, 8, 140);
+        let mut static_labels = Vec::new();
+        static_labels.push(mk_label(&grp_diag, "Wrapper state:", 8, 8, 140));
         let lbl_wrapper_state = mk_label(&grp_diag, "", 150, 8, 240);
-        let _ = mk_label(&grp_diag, "Wrapper version:", 8, 32, 140);
+        static_labels.push(mk_label(&grp_diag, "Wrapper version:", 8, 32, 140));
         let lbl_wrapper_version = mk_label(&grp_diag, "", 150, 32, 240);
-        let _ = mk_label(&grp_diag, "Service state:", 8, 56, 140);
+        static_labels.push(mk_label(&grp_diag, "Service state:", 8, 56, 140));
         let lbl_service_state = mk_label(&grp_diag, "", 150, 56, 240);
-        let _ = mk_label(&grp_diag, "TermSrv version:", 8, 80, 140);
+        static_labels.push(mk_label(&grp_diag, "TermSrv version:", 8, 80, 140));
         let lbl_termsrv_version = mk_label(&grp_diag, "", 150, 80, 240);
-        let _ = mk_label(&grp_diag, "Listener state:", 8, 104, 140);
+        static_labels.push(mk_label(&grp_diag, "Listener state:", 8, 104, 140));
         let lbl_listener_state = mk_label(&grp_diag, "", 150, 104, 240);
-        let _ = mk_label(&grp_diag, "Support level:", 8, 128, 140);
+        static_labels.push(mk_label(&grp_diag, "Support level:", 8, 128, 140));
         let lbl_support_level = mk_label(&grp_diag, "", 150, 128, 240);
 
         // --- General Settings frame -------------------------------------------
@@ -161,13 +181,13 @@ impl App {
             .build(&mut chk_enable_rdp)
             .ok();
 
-        let mut _lbl_port = nwg::Label::default();
+        let mut lbl_port = nwg::Label::default();
         nwg::Label::builder()
             .parent(&grp_general)
             .text("RDP Port:")
             .position((8, 32))
             .size((80, 20))
-            .build(&mut _lbl_port)
+            .build(&mut lbl_port)
             .ok();
 
         let mut spn_port = nwg::NumberSelect::default();
@@ -323,6 +343,12 @@ impl App {
             window,
             font,
             timer,
+            grp_diag,
+            grp_general,
+            grp_auth,
+            grp_shadow,
+            static_labels,
+            lbl_port,
             lbl_wrapper_state,
             lbl_wrapper_version,
             lbl_service_state,
