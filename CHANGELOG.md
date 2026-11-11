@@ -9,6 +9,42 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- DefPolicy patching on Windows 11 24H2/25H2 (`termsrv.dll`
+  6.2.26100.9549). That build's `CDefPolicy::Query` uses an indirect
+  `MOV; MOV; CMP r,r; JNE` gate, which the analyzer deliberately skipped
+  (SEC-ROBUST-01) — the runtime patch was never applied and
+  `offset-finder --dry-run` reported `def_policy: NOT FOUND`. The indirect
+  JNZ form now reuses the validated direct-JNZ branch rewrite: a short
+  `75 rel8` becomes `EB` with the original rel8 preserved, a near
+  `0F 85 rel32` becomes `E9 rel32` plus a NOP, while the forced store
+  writes `0x100` into the captured `[base+W]` field. Verified against the
+  real bytes (patch RVA `0xA6896`) with a round-trip disassembly of the
+  patched control flow.
+- Hardened the DefPolicy analyzer: the indirect form now requires the gate
+  `CMP` to immediately follow the second `MOV` (the old scan forward to
+  `RET` could anchor the rewrite over an unrelated logging call and the
+  `xor esi,esi` that establishes the success return value), and a
+  look-alike direct `CMP` without a matching preceding load no longer
+  aborts the whole function scan.
+- `rdprrap-installer install --force` reuses the saved
+  `OriginalServiceDll` instead of re-snapshotting the live `ServiceDll`,
+  which already points at our own `termwrap.dll`. A reinstall previously
+  left uninstall with no path back to the vanilla `termsrv.dll`.
+- TermService cohort restart now discovers running dependants with
+  `EnumDependentServicesW(SERVICE_ACTIVE)` instead of the `-k netsvcs`
+  ImagePath marker, which matches nothing on recent Windows (TermService
+  runs under `-k NetworkService`; its siblings under
+  `LocalSystemNetworkRestricted` / `SessionEnvSvc`). This is the same set
+  behind `sc stop TermService` failing with 1051. The curated sibling list
+  remains as a floor; the misleading comments and install log line were
+  corrected.
+- `rdprrap-conf` no longer renders a blank configuration window: the four
+  `nwg::Frame` parent containers and the static labels were locals (or
+  `let _ = ...` temporaries) dropped when `build()` returned, whose HWND
+  destruction recursively removed every child control. They are now owned
+  by `App`. Unrelated to elevation — the read-only window was affected too.
+
 ## [0.3.0] - 2026-06-25
 
 ### Changed

@@ -5,9 +5,39 @@
 本项目的重要变更均记录于此文件。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
-版本策略遵循 [Semantic Versioning](https://semver.org/lang/ko/)。
+版本策略遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
 ## [Unreleased]
+
+### 修复
+
+- 修复 Windows 11 24H2/25H2（`termsrv.dll` 6.2.26100.9549）上 DefPolicy
+  patch 未生效的问题。该构建的 `CDefPolicy::Query` 使用间接形式
+  `MOV; MOV; CMP r,r; JNE` 门禁，而分析器此前按 SEC-ROBUST-01 直接跳过
+  indirect JNZ —— 运行时补丁从未写入，`offset-finder --dry-run` 报告
+  `def_policy: NOT FOUND`。现在复用已验证的 direct-JNZ 分支改写：短跳转
+  `75 rel8` 改为 `EB` 并保留原 `rel8`，近跳转 `0F 85 rel32` 改为
+  `E9 rel32` + NOP；强制 store 则把 `0x100` 写入动态捕获的 `[base+W]`
+  字段。已用真实字节码（patch RVA `0xA6896`）验证，并对补丁后的控制流
+  做了反汇编回读校验。
+- 加固 DefPolicy 分析器：间接形式要求门禁 `CMP` 紧跟第二个 `MOV`（旧实现
+  会一直向前扫到 `RET`，可能把重写锚点落在无关的日志调用，以及设置成功
+  返回值的 `xor esi,esi` 上）；direct 形式遇到没有匹配前置 load 的相似
+  `CMP` 也不再中止整个函数扫描。
+- `rdprrap-installer install --force` 重装时复用已保存的
+  `OriginalServiceDll`，不再重新快照当前 `ServiceDll`（此时它已指向我们
+  自己的 `termwrap.dll`）。此前重装会让 uninstall 再也回不到原版
+  `termsrv.dll`。
+- TermService cohort 重启改为通过 `EnumDependentServicesW(SERVICE_ACTIVE)`
+  动态发现运行中的依赖服务，不再依赖 `-k netsvcs` ImagePath 标记 —— 新版
+  Windows 上该标记匹配不到任何服务（TermService 为 `-k NetworkService`，
+  同族服务为 `LocalSystemNetworkRestricted`／`SessionEnvSvc`）。这也正是
+  `sc stop TermService` 返回 1051 的那一组服务。curated sibling 列表保留
+  为兜底，并修正了误导性的注释与安装日志。
+- `rdprrap-conf` 配置窗口不再整片空白：4 个 `nwg::Frame` 父容器与静态
+  标签原本只是 `build()` 的局部变量（或 `let _ = ...` 临时值），函数返回
+  时 Drop 销毁 HWND，连带递归销毁全部子控件。现在由 `App` 持有。该问题
+  与提权无关，只读模式窗口同样受影响。
 
 ## [0.3.0] - 2026-06-25
 

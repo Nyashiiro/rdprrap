@@ -9,6 +9,40 @@
 
 ## [Unreleased]
 
+### 수정됨
+
+- Windows 11 24H2/25H2(`termsrv.dll` 6.2.26100.9549)에서 DefPolicy 패치가
+  적용되지 않던 문제 수정. 해당 빌드의 `CDefPolicy::Query` 는 간접 형태인
+  `MOV; MOV; CMP r,r; JNE` 게이트를 쓰는데, 분석기가 SEC-ROBUST-01에 따라
+  indirect JNZ 를 건너뛰어 런타임 패치가 기록되지 않았고
+  `offset-finder --dry-run` 은 `def_policy: NOT FOUND` 를 보고했음. 이제
+  검증된 direct-JNZ 분기 재작성을 재사용한다. 짧은 `75 rel8` 은 원래
+  rel8을 유지한 채 `EB` 로, 근거리 `0F 85 rel32` 는 `E9 rel32` + NOP 로
+  바꾸고, 강제 store 는 동적으로 포착한 `[base+W]` 필드에 `0x100` 을
+  기록함. 실제 바이트(patch RVA `0xA6896`)로 검증하고 패치 후 제어 흐름을
+  디스어셈블해 되짚어 확인함.
+- DefPolicy 분석기 강화: 간접 형태는 게이트 `CMP` 가 두 번째 `MOV` 바로
+  뒤에 와야 함(기존 구현은 `RET` 까지 계속 스캔해, 무관한 로깅 호출과
+  성공 반환값을 만드는 `xor esi,esi` 위에 재작성 앵커를 잡을 수 있었음).
+  또한 매칭되는 선행 load 가 없는 유사 direct `CMP` 가 함수 전체 스캔을
+  중단시키지 않도록 함.
+- `rdprrap-installer install --force` 재설치 때 현재 `ServiceDll`(이미 자체
+  `termwrap.dll` 을 가리킴)을 다시 스냅샷하지 않고 저장된
+  `OriginalServiceDll` 을 재사용. 기존에는 재설치 후 uninstall 이 순정
+  `termsrv.dll` 로 돌아갈 경로를 잃었음.
+- TermService cohort 재시작이 `-k netsvcs` ImagePath 마커 대신
+  `EnumDependentServicesW(SERVICE_ACTIVE)` 로 실행 중인 의존 서비스를
+  동적으로 찾음. 최신 Windows 에서 이 마커는 아무것도 매칭하지 않음
+  (TermService 는 `-k NetworkService`, 형제 서비스는
+  `LocalSystemNetworkRestricted` / `SessionEnvSvc`). `sc stop TermService`
+  가 1051 로 실패하게 만드는 집합이 바로 이것임. curated sibling 목록은
+  하한선으로 유지하고, 오해를 부르던 주석과 설치 로그를 바로잡음.
+- `rdprrap-conf` 설정 창이 텅 비게 되던 문제 수정. `nwg::Frame` 부모
+  컨테이너 4개와 정적 레이블이 `build()` 의 지역 변수(또는
+  `let _ = ...` 임시값)여서 반환 시 Drop 되며 HWND 와 모든 자식 컨트롤이
+  재귀적으로 파괴됐음. 이제 `App` 이 소유함. 권한 상승과는 무관하며
+  읽기 전용 창도 동일하게 영향받았음.
+
 ## [0.3.0] - 2026-06-25
 
 ### 변경됨
