@@ -44,6 +44,10 @@ RDP 路径仍须在真实 ARM64 硬件／VM 上验证。
 | Server 2022        | ✅  | —   | —     | 与 `windows-latest` runner 匹配                     |
 | Server 2025        | ✅  | —   | —     | 与 `windows-2025` runner 匹配                       |
 
+已验证样本：Windows 11 24H2/25H2 上的 `termsrv.dll` 6.2.26100.9549，
+其 `CDefPolicy::Query` 使用间接形式 `MOV; MOV; CMP r,r; JNE` 门禁 ——
+属于新的指令形状，而非 `struct` offset 移位。
+
 某 OS／架构组合只有在下方**安装／运行时／卸载**各节全部通过之后，才能
 勾选其运行时行。在 `termwrap` 真正打出 ARM64 patch-applied 日志、且
 并发会话 smoke 测试通过之前，不要把 ARM64 标记为生产级支持。
@@ -180,6 +184,10 @@ offset-finder --assert-all C:\Windows\System32\termsrv.dll
       `[Patch Dry-Run]` 区块中出现已解析的 DefPolicy 行，例如：
       `def_policy: base=... value=... write_disp=... is_jnz=... patch_rva=... bytes=[...]`
       —— 而**不是** `def_policy: NOT FOUND`。
+- [ ] `def_policy: NOT FOUND` 不一定意味着 offset 移位：新的指令形状也可能
+      让分析器整体跳过该 patch site（6.2.26100.9549 上的间接
+      `MOV; MOV; CMP r,r; JNE` 门禁正是这种情况）。报告时请附上该函数的
+      反汇编片段。
 - [ ] `property_device` 的 dry-run 会被有意跳过（它需要运行时的 GUID
       遍历），因此出现
       `property_device dry-run: needs runtime walk — skipped`

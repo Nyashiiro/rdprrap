@@ -48,6 +48,10 @@ RDP 경로는 실제 ARM64 하드웨어/VM 에서 아직 검증해야 합니다.
 | Server 2022        | ✅  | —   | —     | `windows-latest` 러너와 매칭                          |
 | Server 2025        | ✅  | —   | —     | `windows-2025` 러너와 매칭                            |
 
+검증 샘플: Windows 11 24H2/25H2 의 `termsrv.dll` 6.2.26100.9549.
+이 빌드의 `CDefPolicy::Query` 는 `MOV; MOV; CMP r,r; JNE` 간접 게이트를
+사용함 — struct 오프셋 이동이 아니라 새로운 명령 형태에 해당함.
+
 런타임 행은 아래 **설치 / 런타임 / 제거** 섹션이 모두 통과한 뒤에만
 체크합니다. ARM64 를 production 지원으로 표시하려면 `termwrap` 의 실제
 ARM64 patch-applied 로그와 동시 세션 smoke 테스트가 반드시 통과해야 합니다.
@@ -180,6 +184,10 @@ offset-finder --assert-all C:\Windows\System32\termsrv.dll
       표시되는지 확인, 예:
       `def_policy: base=... value=... write_disp=... is_jnz=... patch_rva=... bytes=[...]`
       — `def_policy: NOT FOUND` 가 **아니어야** 함.
+- [ ] `def_policy: NOT FOUND` 가 항상 오프셋 이동을 뜻하지는 않음. 새로운
+      명령 형태 때문에 분석기가 패치 위치 전체를 건너뛰는 경우도 있음
+      (6.2.26100.9549 의 `MOV; MOV; CMP r,r; JNE` 간접 게이트가 바로 그
+      사례). 보고 시 해당 함수 디스어셈블리를 함께 첨부.
 - [ ] `property_device` dry-run 은 의도적으로 건너뜀(런타임 GUID-walk 가
       필요하기 때문) — `property_device dry-run: needs runtime walk —
       skipped` 라인이 나오는 게 정상이며 실패가 아님.

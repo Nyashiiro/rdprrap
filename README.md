@@ -155,7 +155,7 @@ field.
 
 | Patch | Purpose | Mechanism |
 |-------|---------|-----------|
-| DefPolicyPatch | Allow multiple RDP sessions | `patcher::analyze` disassembles the policy function and captures the struct displacement, register, and branch direction at runtime; `patcher::encode` then emits the `mov reg, 0x100` + `mov [base+disp32], reg` bytes for the captured layout, so the patch survives struct-offset shifts |
+| DefPolicyPatch | Allow multiple RDP sessions | `patcher::analyze` disassembles the policy function and captures the struct displacement, register, and branch direction at runtime; `patcher::encode` then emits the `mov reg, 0x100` + `mov [base+disp32], reg` bytes for the captured layout, so the patch survives struct-offset shifts. For JNZ gates the original `Jne` is rewritten to an unconditional JMP to the same target (short `75 rel8` -> `EB`, near `0F 85 rel32` -> `E9 rel32` + NOP), which also supports the indirect `MOV; MOV; CMP r,r; JNE` shape |
 | SingleUserPatch | Disable per-user session limit | NOP out VerifyVersionInfoW call or CMP instruction |
 | LocalOnlyPatch | Remove local-only license restriction | Convert JZ to unconditional JMP |
 | NonRDPPatch | Allow non-RDP stack | Replace CALL with `inc [ecx]; xor eax,eax` |
@@ -176,7 +176,7 @@ CI runs automatically on push/PR: Linux check + Windows x64/x86 full build + ARM
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
-| RDP multi-session worked, then stopped after a Windows update / new build | A `termsrv.dll` change moved a patch site so the patcher could not resolve it on the new build (the issue-#3 class of regression) | Run `offset-finder --dry-run C:\Windows\System32\termsrv.dll` and look at the `[Patch Dry-Run]` block. A `NOT FOUND` line tells you exactly which patch site failed to resolve. Capture that output plus the `termsrv.dll` version and file it for triage. |
+| RDP multi-session worked, then stopped after a Windows update / new build | Either a `termsrv.dll` change moved a patch site so the patcher could not resolve it (the issue-#3 class), or the compiler emitted a new instruction shape the analyzer does not support yet — e.g. the indirect `MOV; MOV; CMP r,r; JNE` DefPolicy gate on 6.2.26100.9549 | Run `offset-finder --dry-run C:\Windows\System32\termsrv.dll` and look at the `[Patch Dry-Run]` block. A `NOT FOUND` line tells you exactly which patch site failed to resolve. Capture that output plus the `termsrv.dll` version and file it for triage. |
 
 ## Contributing
 

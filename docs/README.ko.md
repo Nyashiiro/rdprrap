@@ -154,7 +154,7 @@ Microsoft 가 필드를 옮겨도 갱신할 오프셋 맵이 없습니다.
 
 | 패치 | 목적 | 메커니즘 |
 |------|------|----------|
-| DefPolicyPatch | 다중 RDP 세션 허용 | `patcher::analyze` 가 정책 함수를 디스어셈블해 struct displacement, 레지스터, 분기 방향을 런타임에 포착하고, `patcher::encode` 가 포착한 레이아웃에 맞춰 `mov reg, 0x100` + `mov [base+disp32], reg` 바이트를 생성 — struct 오프셋 변동을 견딤 |
+| DefPolicyPatch | 다중 RDP 세션 허용 | `patcher::analyze` 가 정책 함수를 디스어셈블해 struct displacement, 레지스터, 분기 방향을 런타임에 포착하고, `patcher::encode` 가 포착한 레이아웃에 맞춰 `mov reg, 0x100` + `mov [base+disp32], reg` 바이트를 생성 — struct 오프셋 변동을 견딤. JNZ 게이트에서는 원래 `Jne` 를 같은 대상을 가리키는 무조건 JMP 로 재작성하므로(짧은 `75 rel8` → `EB`, 근거리 `0F 85 rel32` → `E9 rel32` + NOP) `MOV; MOV; CMP r,r; JNE` 간접 형태도 지원함 |
 | SingleUserPatch | 사용자별 세션 제한 비활성화 | VerifyVersionInfoW 호출 또는 CMP 명령어 NOP 처리 |
 | LocalOnlyPatch | 로컬 전용 라이선스 제한 해제 | JZ를 무조건 JMP로 변환 |
 | NonRDPPatch | 비-RDP 스택 허용 | CALL을 `inc [ecx]; xor eax,eax`로 교체 |
@@ -175,7 +175,7 @@ CI는 push/PR 시 자동 실행: Linux 체크 + Windows x64/x86 풀 빌드 + ARM
 
 | 증상 | 가능한 원인 | 대처 |
 |------|------------|------|
-| 멀티세션 RDP 가 잘 되다가 Windows 업데이트 / 새 빌드 후 멈춤 | `termsrv.dll` 변경으로 패치 위치가 이동해 새 빌드에서 패처가 해석하지 못함 (이슈 #3 부류 회귀) | `offset-finder --dry-run C:\Windows\System32\termsrv.dll` 을 실행하고 `[Patch Dry-Run]` 블록을 확인. `NOT FOUND` 라인이 어느 패치 위치가 해석에 실패했는지 정확히 알려줌. 그 출력과 `termsrv.dll` 버전을 함께 수집해 분류용으로 보고. |
+| 멀티세션 RDP 가 잘 되다가 Windows 업데이트 / 새 빌드 후 멈춤 | `termsrv.dll` 변경으로 패치 위치가 이동해 패처가 해석하지 못한 경우(이슈 #3 부류 회귀)이거나, 분석기가 아직 지원하지 않는 새 명령 형태가 컴파일러에 의해 생성된 경우 — 예: 6.2.26100.9549 의 간접 `MOV; MOV; CMP r,r; JNE` DefPolicy 게이트 | `offset-finder --dry-run C:\Windows\System32\termsrv.dll` 을 실행하고 `[Patch Dry-Run]` 블록을 확인. `NOT FOUND` 라인이 어느 패치 위치가 해석에 실패했는지 정확히 알려줌. 그 출력과 `termsrv.dll` 버전을 함께 수집해 분류용으로 보고. |
 
 ## 기여
 

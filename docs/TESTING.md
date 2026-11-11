@@ -48,6 +48,10 @@ hardware/VMs.
 | Server 2022        | ✅  | —   | —     | Matches `windows-latest` runner                    |
 | Server 2025        | ✅  | —   | —     | Matches `windows-2025` runner                      |
 
+Validated sample: `termsrv.dll` 6.2.26100.9549 (Windows 11 24H2/25H2),
+whose `CDefPolicy::Query` uses the indirect `MOV; MOV; CMP r,r; JNE`
+gate — a new instruction shape rather than a shifted struct offset.
+
 Tick a runtime row only after the full **Install**, **Runtime**,
 **Uninstall** sections below all pass on that OS/arch pair. Do not mark
 ARM64 as production-supported until `termwrap` emits real ARM64
@@ -187,6 +191,10 @@ offset-finder --assert-all C:\Windows\System32\termsrv.dll
       line, e.g.
       `def_policy: base=... value=... write_disp=... is_jnz=... patch_rva=... bytes=[...]`
       — **not** `def_policy: NOT FOUND`.
+- [ ] A `NOT FOUND` DefPolicy line is not always a shifted offset: a new
+      instruction shape can make the analyzer skip the site entirely (the
+      indirect `MOV; MOV; CMP r,r; JNE` gate on 6.2.26100.9549 was exactly
+      that). Attach the function disassembly when reporting.
 - [ ] `property_device` dry-run is intentionally skipped (it needs the
       runtime GUID-walk), so a `property_device dry-run: needs runtime
       walk — skipped` line is expected, not a failure.

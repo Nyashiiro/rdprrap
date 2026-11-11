@@ -152,7 +152,7 @@ DefPolicy／PropertyDevice，`struct` displacement、`register` 与 分支判断
 
 | patch | 用途 | 机制 |
 |-------|---------|-----------|
-| DefPolicyPatch | 允许多个 RDP 会话 | `patcher::analyze` 反汇编 policy 函数，在运行时捕获 `struct` displacement、`register` 与 `branch` 方向；`patcher::encode` 再按捕获到的布局生成 `mov reg, 0x100` + `mov [base+disp32], reg` bytes，因此能经受 `struct` offset 变动 |
+| DefPolicyPatch | 允许多个 RDP 会话 | `patcher::analyze` 反汇编 policy 函数，在运行时捕获 `struct` displacement、`register` 与 `branch` 方向；`patcher::encode` 再按捕获到的布局生成 `mov reg, 0x100` + `mov [base+disp32], reg` bytes，因此能经受 `struct` offset 变动。对 JNZ 门禁，还会把原来的 `Jne` 改写成指向同一目标的无条件 JMP（短 `75 rel8` → `EB`，近 `0F 85 rel32` → `E9 rel32` + NOP），因此也支持 `MOV; MOV; CMP r,r; JNE` 这种间接形式 |
 | SingleUserPatch | 关闭按用户的会话数限制 | 用 NOP 抹掉 VerifyVersionInfoW 调用或 CMP 指令 |
 | LocalOnlyPatch | 解除 local-only 许可限制 | 把 JZ 改成无条件 JMP |
 | NonRDPPatch | 允许非 RDP 协议栈 | 用 `inc [ecx]; xor eax,eax` 替换 CALL |
@@ -173,7 +173,7 @@ cargo fmt --check                                   # 格式检查
 
 | 症状 | 可能原因 | 处理方式 |
 |---------|--------------|------------|
-| 多会话 RDP 原本可用，Windows 更新／换新构建后失效 | `termsrv.dll` 变动导致某处 patch site 移位，patcher 在新构建上无法解析（即 issue-#3 那一类回归） | 运行 `offset-finder --dry-run C:\Windows\System32\termsrv.dll`，查看 `[Patch Dry-Run]` 区块。出现 `NOT FOUND` 的那一行，正好指出哪个 patch site 解析失败。把该输出与 `termsrv.dll` 版本一并留存，供排查。 |
+| 多会话 RDP 原本可用，Windows 更新／换新构建后失效 | 要么是 `termsrv.dll` 变动导致某处 patch site 移位、patcher 无法解析（即 issue-#3 那一类回归），要么是编译器生成了分析器尚不支持的新指令形状 —— 例如 6.2.26100.9549 上的间接 `MOV; MOV; CMP r,r; JNE` DefPolicy 门禁 | 运行 `offset-finder --dry-run C:\Windows\System32\termsrv.dll`，查看 `[Patch Dry-Run]` 区块。出现 `NOT FOUND` 的那一行，正好指出哪个 patch site 解析失败。把该输出与 `termsrv.dll` 版本一并留存，供排查。 |
 
 ## 参与贡献
 
